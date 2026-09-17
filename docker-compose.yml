@@ -1,0 +1,25 @@
+services:
+  clippyc2:
+    build: .
+    env_file: .env
+    expose:
+      - "5000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - clippyc2
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

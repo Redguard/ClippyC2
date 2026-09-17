@@ -1,0 +1,3 @@
+{$CLIPPYC2_DOMAIN} {
+	reverse_proxy clippyc2:5000
+}

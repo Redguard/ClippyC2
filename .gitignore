@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+log.txt
+*.db
+data/
+agent/agent_win/*.o
+agent/agent_win/agent_win.exe

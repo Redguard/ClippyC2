@@ -1,0 +1,9 @@
+.git
+.gitignore
+*.md
+clippyC2.png
+agent/
+.env
+__pycache__
+*.pyc
+log.txt
