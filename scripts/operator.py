@@ -29,12 +29,22 @@ BUILTIN_COMMANDS = ("help", "status", "exec", "bof", "tasks", "exit", "quit")
 
 
 class OperatorClient:
-    def __init__(self, base_url: str, password: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        password: str,
+        insecure: bool = False,
+        ca_cert: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.password = password
-        self.ssl_context = ssl.create_default_context()
-        self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode = ssl.CERT_NONE
+        if ca_cert:
+            self.ssl_context = ssl.create_default_context(cafile=ca_cert)
+        else:
+            self.ssl_context = ssl.create_default_context()
+        if insecure:
+            self.ssl_context.check_hostname = False
+            self.ssl_context.verify_mode = ssl.CERT_NONE
 
     def request_json(self, path: str, params: dict | None = None) -> dict:
         query = f"?{urllib.parse.urlencode(params)}" if params else ""
@@ -532,6 +542,18 @@ def main() -> None:
     parser.add_argument("--password", default=os.environ.get("CLIPPYC2_OPERATOR_PASSWORD", ""))
     parser.add_argument("command", nargs="?", help="Optional one-shot command: exec, tasks, status")
     parser.add_argument("cmd_args", nargs="*", help="Arguments for one-shot command")
+    parser.add_argument(
+        "-k",
+        "--insecure",
+        action="store_true",
+        default=os.environ.get("CLIPPYC2_INSECURE") == "1",
+        help="Disable TLS certificate verification (for self-signed certs in labs)",
+    )
+    parser.add_argument(
+        "--cacert",
+        default=os.environ.get("CLIPPYC2_CA_CERT"),
+        help="Path to CA bundle file for TLS verification",
+    )
     args = parser.parse_args()
 
     if not args.password:
@@ -541,7 +563,12 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    client = OperatorClient(args.base_url, args.password)
+    client = OperatorClient(
+        args.base_url,
+        args.password,
+        insecure=args.insecure,
+        ca_cert=args.cacert,
+    )
 
     if args.command:
         run_oneshot(client, args.command, args.cmd_args)
