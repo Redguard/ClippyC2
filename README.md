@@ -4,7 +4,7 @@ PoC clipboard C2 for **remote browser isolation (RBI)** — browser egress is bl
 
 ![](clippyC2.png)
 
-More details about this PoC can be found in [our blog](http://www.redguard.ch/blog/2026/09/18/clippyc2-deep-dive/).
+More details about this PoC can be found in [our blog](http://www.redguard.ch/blog/2026/10/06/clippyc2-deep-dive/).
 
 ## Quick start
 
@@ -34,4 +34,8 @@ python3 scripts/operator.py https://<CLIPPYC2_DOMAIN>
 | `tasks` | List all commands |
 | `tasks <id>` | Show output for one command |
 | `exit` | Quit |
+
+## Disclaimer
+
+This tool is intended strictly for educational and authorized testing purposes only. It must only be used on systems where you have explicit, authorized permission. The authors assume no liability and are not responsible for any misuse or damage caused by this program.
 
